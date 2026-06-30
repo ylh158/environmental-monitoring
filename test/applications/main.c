@@ -1,9 +1,17 @@
 /*
  * Smart Monitoring System — Main thread launcher
  * Multi-thread architecture based on RT-Thread message queues
+ *
+ * Unified button mapping:
+ *   UP   (PC0) = ↑ navigate up
+ *   DOWN (PC1) = ↓ navigate down
+ *   LEFT (PC5) = ✓ confirm / enter / wake LCD
+ *   RIGHT(PC4) = ← exit / back (→ boot menu)
  */
 
 #include "threads.h"
+#include "threshold_storage.h"
+#include "motor.h"
 #include <board.h>
 #include <wlan_mgnt.h>
 #include <onenet.h>
@@ -20,18 +28,35 @@ rt_mq_t mq_display_wake = RT_NULL;
 
 static rt_device_t g_lcd = RT_NULL;
 
-/* WK_UP button — wake LCD on press */
-#define BTN_WAKE   GET_PIN(C, 5)
-#define BTN_EXIT   GET_PIN(C, 4)
+/* Unified button mapping:
+ *   UP   (PC0)  = ↑ navigate up
+ *   DOWN (PC1)  = ↓ navigate down
+ *   LEFT (PC5)  = ✓ confirm / enter
+ *   RIGHT(PC4)  = ← exit / back
+ */
+#define BTN_UP     GET_PIN(C, 0)
+#define BTN_DOWN   GET_PIN(C, 1)
+#define BTN_LEFT   GET_PIN(C, 5)
+#define BTN_RIGHT  GET_PIN(C, 4)
 
-static void btn_wake_cb(void *args)
+static void btn_left_cb(void *args)
 {
-    int v = 1;
+    int v = 1;  /* confirm / enter */
     rt_mq_send(mq_display_wake, &v, sizeof(v));
 }
-static void btn_exit_cb(void *args)
+static void btn_right_cb(void *args)
 {
-    int v = 2;  /* 2 = exit to menu */
+    int v = 2;  /* exit / back */
+    rt_mq_send(mq_display_wake, &v, sizeof(v));
+}
+static void btn_up_cb(void *args)
+{
+    int v = 3;  /* up / scroll up */
+    rt_mq_send(mq_display_wake, &v, sizeof(v));
+}
+static void btn_down_cb(void *args)
+{
+    int v = 4;  /* down / scroll down */
     rt_mq_send(mq_display_wake, &v, sizeof(v));
 }
 
@@ -52,37 +77,58 @@ static void btn_exit_cb(void *args)
 
 extern int g_lcd_mode;  /* defined in thread_display.c */
 
+/* forward declarations */
+static void show_quick_status(void);
+static void show_fan_control(void);
+
 /* boot menu — select display mode */
 void run_boot_menu(void)
 {
     #define KEY_UP    GET_PIN(C, 0)
     #define KEY_DOWN  GET_PIN(C, 1)
-    #define KEY_OK    GET_PIN(C, 5)
+    #define KEY_LEFT  GET_PIN(C, 5)
 
-    const char *opts[] = { "> Always On", "> Power Save" };
     int sel = 0, last = -1;
 
     rt_pin_mode(KEY_UP,   PIN_MODE_INPUT_PULLUP);
     rt_pin_mode(KEY_DOWN, PIN_MODE_INPUT_PULLUP);
-    rt_pin_mode(KEY_OK,   PIN_MODE_INPUT_PULLUP);
+    rt_pin_mode(KEY_LEFT, PIN_MODE_INPUT_PULLUP);
 
     lcd_clear(WHITE);
     lcd_set_color(WHITE, BLUE);
     lcd_show_string(30, 20, 24, "Select Mode");
 
     while (1) {
-        if (!rt_pin_read(KEY_UP) && sel > 0)   { sel--; rt_thread_mdelay(200); }
-        if (!rt_pin_read(KEY_DOWN) && sel < 1) { sel++; rt_thread_mdelay(200); }
+        if (!rt_pin_read(KEY_LEFT) && sel > 0)   { sel--; rt_thread_mdelay(200); }
+        if (!rt_pin_read(KEY_DOWN) && sel < 3) { sel++; rt_thread_mdelay(200); }
 
         if (sel != last) {
             lcd_set_color(WHITE, BLACK);
-            lcd_show_string(40, 80,  24, sel == 0 ? "> Always On"  : "  Always On");
-            lcd_show_string(40, 120, 24, sel == 1 ? "> Power Save" : "  Power Save");
+            lcd_show_string(40, 60,  24, sel == 0 ? "> Always On"      : "  Always On");
+            lcd_show_string(40, 90,  24, sel == 1 ? "> Power Save"     : "  Power Save");
+            lcd_show_string(40, 120, 24, sel == 2 ? "> Connect Status" : "  Connect Status");
+            lcd_show_string(40, 150, 24, sel == 3 ? "> Fan Control"    : "  Fan Control");
             last = sel;
         }
 
-        if (!rt_pin_read(KEY_OK)) {
-            rt_thread_mdelay(300); /* debounce */
+        if (!rt_pin_read(KEY_UP)) {
+            rt_thread_mdelay(300);
+            if (sel == 2) {
+                show_quick_status();
+                lcd_clear(WHITE);
+                lcd_set_color(WHITE, BLUE);
+                lcd_show_string(30, 20, 24, "Select Mode");
+                last = -1;
+                continue;
+            }
+            if (sel == 3) {
+                show_fan_control();
+                lcd_clear(WHITE);
+                lcd_set_color(WHITE, BLUE);
+                lcd_show_string(30, 20, 24, "Select Mode");
+                last = -1;
+                continue;
+            }
             g_lcd_mode = sel;
             break;
         }
@@ -92,7 +138,147 @@ void run_boot_menu(void)
     lcd_clear(WHITE);
     #undef KEY_UP
     #undef KEY_DOWN
-    #undef KEY_OK
+    #undef KEY_LEFT
+}
+
+/* 快速状态查看 — 只显示当前连接状态，按RIGHT返回菜单 */
+static void show_quick_status(void)
+{
+    #define KEY_RIGHT_QS   GET_PIN(C, 4)
+
+    lcd_clear(WHITE);
+    lcd_fill(0, 0, 239, 35, BLUE);
+    lcd_set_color(BLUE, WHITE);
+    lcd_show_string(30, 6, 24, "Connection Status");
+
+    lcd_set_color(WHITE, BLACK);
+    lcd_show_string(20, 60, 20, "SSID: %s", WIFI_SSID);
+
+    lcd_set_color(WHITE, g_wifi_ok  ? GREEN : RED);
+    lcd_show_string(20, 100, 24, "WiFi:  %s", g_wifi_ok  ? "Connected" : "Disconnected");
+
+    lcd_set_color(WHITE, g_cloud_ok ? GREEN : RED);
+    lcd_show_string(20, 140, 24, "Cloud: %s", g_cloud_ok ? "Connected" : "Disconnected");
+
+    lcd_set_color(WHITE, BLACK);
+    lcd_show_string(30, 200, 16, "Press RIGHT to exit");
+
+    rt_pin_mode(KEY_RIGHT_QS, PIN_MODE_INPUT_PULLUP);
+    while (1) {
+        if (!rt_pin_read(KEY_RIGHT_QS)) {
+            rt_thread_mdelay(300);
+            break;
+        }
+        rt_thread_mdelay(50);
+    }
+    #undef KEY_RIGHT_QS
+}
+
+/* 风扇控制界面 — 物理UP(PC5)=开, 物理DOWN=关, RIGHT=退出 */
+static void show_fan_control(void)
+{
+    lcd_clear(WHITE);
+    lcd_fill(0, 0, 239, 35, BLUE);
+    lcd_set_color(BLUE, WHITE);
+    lcd_show_string(40, 6, 24, "Fan Control");
+
+    lcd_set_color(WHITE, BLACK);
+    lcd_show_string(30, 65, 24, "Current: ");
+    lcd_set_color(WHITE, g_motor_state ? GREEN : RED);
+    lcd_show_string(160, 65, 24, "%s", g_motor_state ? "ON" : "OFF");
+
+    lcd_set_color(WHITE, BLACK);
+    lcd_show_string(30, 110, 24, "UP   = Turn ON");
+    lcd_show_string(30, 145, 24, "DOWN = Turn OFF");
+    lcd_show_string(30, 210, 16, "Press RIGHT to exit");
+
+    /* 等待所有按键释放，避免菜单确认键误触发 */
+    while (!rt_pin_read(BTN_LEFT) || !rt_pin_read(BTN_DOWN) ||
+           !rt_pin_read(BTN_UP) || !rt_pin_read(BTN_RIGHT))
+        rt_thread_mdelay(20);
+
+    int last_state = g_motor_state;         /* 跟踪云端远程改变 */
+
+    while (1) {
+        /* 检测云端远程改变的电机状态并刷新LCD */
+        if (g_motor_state != last_state) {
+            last_state = g_motor_state;
+            lcd_fill(160, 55, 235, 85, WHITE);
+            lcd_set_color(WHITE, g_motor_state ? GREEN : RED);
+            lcd_show_string(160, 65, 24, "%s", g_motor_state ? "ON" : "OFF");
+        }
+        if (!rt_pin_read(BTN_LEFT)) {       /* 物理UP键(PC5) = 开 */
+            motor_forward();
+            g_motor_state = 1;
+            lcd_fill(160, 55, 235, 85, WHITE);
+            lcd_set_color(WHITE, GREEN);
+            lcd_show_string(160, 65, 24, "ON");
+            rt_thread_mdelay(300);
+        }
+        if (!rt_pin_read(BTN_DOWN)) {       /* 物理DOWN键(PC1) = 关 */
+            motor_stop();
+            g_motor_state = 0;
+            lcd_fill(160, 55, 235, 85, WHITE);
+            lcd_set_color(WHITE, RED);
+            lcd_show_string(160, 65, 24, "OFF");
+            rt_thread_mdelay(300);
+        }
+        if (!rt_pin_read(BTN_RIGHT)) {      /* RIGHT = 退出 */
+            rt_thread_mdelay(300);
+            break;
+        }
+        rt_thread_mdelay(50);
+    }}
+
+/* Connection status screen — shown after mode selection, before main UI */
+static void show_connect_status(void)
+{
+    rt_tick_t deadline;
+
+    lcd_fill(0, 0, 239, 35, BLUE);
+    lcd_set_color(BLUE, WHITE);
+    lcd_show_string(20, 6, 24, "System Connecting...");
+
+    /* WiFi SSID */
+    lcd_set_color(WHITE, BLACK);
+    lcd_show_string(20, 60, 16, "SSID:");
+    lcd_set_color(WHITE, BLUE);
+    lcd_show_string(70, 60, 16, "%s", WIFI_SSID);
+
+    /* Wait for WiFi */
+    lcd_set_color(WHITE, BLACK);
+    lcd_show_string(20, 110, 24, "WiFi: Connecting...");
+    deadline = rt_tick_get() + rt_tick_from_millisecond(15000);
+    while (!g_wifi_ok && rt_tick_get() < deadline)
+        rt_thread_mdelay(500);
+
+    lcd_fill(0, 104, 239, 134, WHITE);
+    if (g_wifi_ok) {
+        lcd_set_color(WHITE, GREEN);
+        lcd_show_string(20, 110, 24, "WiFi: OK");
+
+        /* Wait for Cloud */
+        lcd_set_color(WHITE, BLACK);
+        lcd_show_string(20, 150, 24, "Cloud: Connecting...");
+        deadline = rt_tick_get() + rt_tick_from_millisecond(10000);
+        while (!g_cloud_ok && rt_tick_get() < deadline)
+            rt_thread_mdelay(500);
+
+        lcd_fill(0, 144, 239, 174, WHITE);
+        if (g_cloud_ok) {
+            lcd_set_color(WHITE, GREEN);
+            lcd_show_string(20, 150, 24, "Cloud: OK");
+        } else {
+            lcd_set_color(WHITE, RED);
+            lcd_show_string(20, 150, 24, "Cloud: FAIL");
+        }
+    } else {
+        lcd_set_color(WHITE, RED);
+        lcd_show_string(20, 110, 24, "WiFi: FAIL");
+    }
+
+    rt_thread_mdelay(2000);
+    lcd_clear(WHITE);
 }
 
 int main(void)
@@ -104,8 +290,11 @@ int main(void)
     if (g_lcd)
         rt_device_open(g_lcd, RT_DEVICE_OFLAG_RDWR);
 
-    LCD_BackLightSet(80); /* backlight on for menu */
+    LCD_BackLightSet(80);
     run_boot_menu();
+
+    /* Load thresholds saved in flash (override code defaults if valid) */
+    threshold_load();
 
     /* create message queues */
     mq_sensor       = rt_mq_create("sensor", sizeof(struct sensor_msg), 4, RT_IPC_FLAG_FIFO);
@@ -115,24 +304,31 @@ int main(void)
 
     RT_ASSERT(mq_sensor && mq_rfid && mq_gps && mq_display_wake);
 
-    /* WK_UP(PC5): wake LCD */
-    rt_pin_mode(BTN_WAKE, PIN_MODE_INPUT_PULLUP);
-    rt_pin_attach_irq(BTN_WAKE, PIN_IRQ_MODE_FALLING, btn_wake_cb, RT_NULL);
-    rt_pin_irq_enable(BTN_WAKE, PIN_IRQ_ENABLE);
+    /* LEFT (PC5): confirm / enter / wake LCD */
+    rt_pin_mode(BTN_LEFT, PIN_MODE_INPUT_PULLUP);
+    rt_pin_attach_irq(BTN_LEFT, PIN_IRQ_MODE_FALLING, btn_left_cb, RT_NULL);
+    rt_pin_irq_enable(BTN_LEFT, PIN_IRQ_ENABLE);
 
-    /* PC4: exit to mode menu */
-    rt_pin_mode(BTN_EXIT, PIN_MODE_INPUT_PULLUP);
-    rt_pin_attach_irq(BTN_EXIT, PIN_IRQ_MODE_FALLING, btn_exit_cb, RT_NULL);
-    rt_pin_irq_enable(BTN_EXIT, PIN_IRQ_ENABLE);
+    /* RIGHT (PC4): exit / back */
+    rt_pin_mode(BTN_RIGHT, PIN_MODE_INPUT_PULLUP);
+    rt_pin_attach_irq(BTN_RIGHT, PIN_IRQ_MODE_FALLING, btn_right_cb, RT_NULL);
+    rt_pin_irq_enable(BTN_RIGHT, PIN_IRQ_ENABLE);
 
-    /* launch threads */
+    /* UP (PC0): navigate up */
+    rt_pin_mode(BTN_UP, PIN_MODE_INPUT_PULLUP);
+    rt_pin_attach_irq(BTN_UP, PIN_IRQ_MODE_FALLING, btn_up_cb, RT_NULL);
+    rt_pin_irq_enable(BTN_UP, PIN_IRQ_ENABLE);
+
+    /* DOWN (PC1): navigate down */
+    rt_pin_mode(BTN_DOWN, PIN_MODE_INPUT_PULLUP);
+    rt_pin_attach_irq(BTN_DOWN, PIN_IRQ_MODE_FALLING, btn_down_cb, RT_NULL);
+    rt_pin_irq_enable(BTN_DOWN, PIN_IRQ_ENABLE);
+
+    /* Launch non-display threads first */
     tid = rt_thread_create("sensor",  sensor_thread_entry,  RT_NULL, STK_SENSOR,  PRI_SENSOR,  10);
     if (tid) rt_thread_startup(tid);
 
     tid = rt_thread_create("rfid",    rfid_thread_entry,    RT_NULL, STK_RFID,    PRI_RFID,    10);
-    if (tid) rt_thread_startup(tid);
-
-    tid = rt_thread_create("display", display_thread_entry, RT_NULL, STK_DISPLAY, PRI_DISPLAY, 10);
     if (tid) rt_thread_startup(tid);
 
     tid = rt_thread_create("alarm",   alarm_thread_entry,   RT_NULL, STK_ALARM,   PRI_ALARM,   10);
@@ -144,7 +340,14 @@ int main(void)
     tid = rt_thread_create("gps",     gps_thread_entry,     RT_NULL, STK_GPS,     PRI_GPS,     10);
     if (tid) rt_thread_startup(tid);
 
-    rt_kprintf("[main] 6 threads started, system running\n");
+    /* Show WiFi/Cloud connection status */
+    show_connect_status();
+
+    /* Launch display thread last — starts with clean screen */
+    tid = rt_thread_create("display", display_thread_entry, RT_NULL, STK_DISPLAY, PRI_DISPLAY, 10);
+    if (tid) rt_thread_startup(tid);
+
+    rt_kprintf("[main] 6 threads started\n");
 
     return 0;
 }

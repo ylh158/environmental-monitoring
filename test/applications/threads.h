@@ -29,8 +29,11 @@ extern rt_mq_t mq_rfid;
 extern rt_mq_t mq_gps;
 extern rt_mq_t mq_display_wake;
 
-/* ---- Thresholds ---- */
-#define TEMP_THRESHOLD  35.0f   /* alarm above this */
+/* ---- Adjustable thresholds (settable from OneNET cloud) ---- */
+extern volatile float g_temp_high;
+extern volatile float g_temp_low;
+extern volatile float g_humi_high;
+extern volatile float g_humi_low;
 
 /* ---- Cached sensor data (zero-copy for display) ---- */
 extern volatile float g_temp;
@@ -41,8 +44,28 @@ extern volatile int   g_data_ready;
 extern volatile char  g_rfid_uid[32];   /* 最近一次识别的卡号 */
 extern volatile int   g_rfid_updated;   /* 是否有新卡号待上传 */
 
-/* ---- Global flags ---- */
+/* ---- WiFi credentials ---- */
+#define WIFI_SSID       "vivo"
+#define WIFI_PASSWORD   "11050712"
+
+/* ---- RFID bound records ---- */
+#define MAX_RECORDS    20
+
+struct rfid_record_t {
+    char    uid[32];       /* card UID string (e.g. "AA:BB:CC:DD") */
+    float   temp;          /* temperature at scan time */
+    float   humi;          /* humidity at scan time */
+    float   lat;           /* GPS latitude at scan time */
+    float   lng;           /* GPS longitude at scan time */
+    uint32_t tick;         /* system tick when recorded */
+};
+
+/* ---- Connection flags (defined in thread_cloud.c) ---- */
 extern rt_bool_t g_wifi_ok;
+extern rt_bool_t g_cloud_ok;
+
+/* ---- Motor state (defined in thread_cloud.c) ---- */
+extern volatile int g_motor_state;  /* 0=OFF, 1=ON */
 
 /* ---- Thread entries ---- */
 void sensor_thread_entry(void *param);

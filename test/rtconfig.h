@@ -99,6 +99,7 @@
 #define RT_USING_SPI
 #define RT_USING_SENSOR
 #define RT_USING_SENSOR_CMD
+#define BSP_USING_ON_CHIP_FLASH
 #define RT_USING_WIFI
 #define RT_WLAN_DEVICE_STA_NAME "wlan0"
 #define RT_WLAN_DEVICE_AP_NAME "wlan1"
